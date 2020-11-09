@@ -1,0 +1,407 @@
+Description:  This template (1/2) deploys the base network for this demo.
+
+Parameters:
+  LatestAmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+
+Resources:
+  EndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+        GroupDescription: Allow instances to get to SSM Systems Manager
+        VpcId: !Ref VPCConsumer
+        SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 10.10.0.0/16
+
+  SSMEndpoint1:
+    Type: AWS::EC2::VPCEndpoint
+    Properties: 
+        PrivateDnsEnabled: true
+        SecurityGroupIds: 
+          - !Ref EndpointSecurityGroup
+        ServiceName: 
+          !Join
+            - ''
+            - - 'com.amazonaws.'
+              - !Ref AWS::Region
+              - '.ssm'
+        SubnetIds: 
+          - !Ref VPCConsumerSubnet
+        VpcEndpointType: Interface
+        VpcId: !Ref VPCConsumer
+
+  SSMEndpoint2:
+    Type: AWS::EC2::VPCEndpoint
+    Properties: 
+        PrivateDnsEnabled: true
+        SecurityGroupIds: 
+          - !Ref EndpointSecurityGroup
+        ServiceName: 
+          !Join
+            - ''
+            - - 'com.amazonaws.'
+              - !Ref AWS::Region
+              - '.ec2messages'
+        SubnetIds: 
+          - !Ref VPCConsumerSubnet
+        VpcEndpointType: Interface
+        VpcId: !Ref VPCConsumer
+
+  SSMEndpoint3:
+    Type: AWS::EC2::VPCEndpoint
+    Properties: 
+        PrivateDnsEnabled: true
+        SecurityGroupIds: 
+          - !Ref EndpointSecurityGroup
+        ServiceName: 
+          !Join
+            - ''
+            - - 'com.amazonaws.'
+              - !Ref AWS::Region
+              - '.ssmmessages'
+        SubnetIds: 
+          - !Ref VPCConsumerSubnet
+        VpcEndpointType: Interface
+        VpcId: !Ref VPCConsumer
+  
+  VPCConsumer:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.10.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: "Consumer VPC"
+
+  VPCConsumerSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPCConsumer
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: 10.10.0.0/24
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPCConsumer} Private Subnet (AZ1)
+      
+  IAMRoleSSM:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: SSM_access
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  SSMInstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties: 
+      InstanceProfileName: SSM_access
+      Path: "/"
+      Roles: 
+        - Ref: "IAMRoleSSM"
+
+  TestServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: t3.micro
+      SubnetId: !Ref VPCConsumerSubnet
+      IamInstanceProfile: SSM_access
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # install updates
+          yum update -y
+      Tags:
+        - Key: Name
+          Value: !Join [ '', [ 'TestServer-', !Ref 'AWS::StackName' ] ] 
+  
+  VPC1:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.20.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: "Shared Services VPC"
+
+  VPC1Subnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC1
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: 10.20.0.0/24
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPC1} Private Subnet (AZ1)
+          
+  VPC1Subnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC1
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      CidrBlock: 10.20.1.0/24
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPC1} Private Subnet (AZ2)
+
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC1
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPC1} Private Routes
+
+  PrivateRouteSharedServices:
+    Type: AWS::EC2::Route
+    DependsOn: AttachVPNGateway
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 10.10.0.0/16
+      GatewayId: !Ref MyVPNGateway
+
+  VPC1Subnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      SubnetId: !Ref VPC1Subnet1
+
+  VPC1Subnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      SubnetId: !Ref VPC1Subnet2
+
+  MyVPNGateway:
+    Type: AWS::EC2::VPNGateway
+    Properties: 
+      Type: ipsec.1
+
+  myCustomerGateway: 
+    Type: AWS::EC2::CustomerGateway
+    Properties: 
+        Type: ipsec.1
+        BgpAsn: 65534
+        IpAddress: !Ref MyEIP
+
+  AttachVPNGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId:
+        Ref: VPC1
+      VpnGatewayId:
+        Ref: MyVPNGateway
+
+  myVPNConnection: 
+    Type: AWS::EC2::VPNConnection
+    Properties: 
+      Type: ipsec.1
+      StaticRoutesOnly: true
+      CustomerGatewayId: 
+        !Ref myCustomerGateway
+      VpnGatewayId: 
+        !Ref MyVPNGateway
+      VpnTunnelOptionsSpecifications: 
+        - PreSharedKey: 9ndNNmrD98coJdb28x__jwd7Dk._
+      Tags:
+        - Key: Name
+          Value: Demo VPN Connection
+
+  VPNStaticRoute:  
+    Type: AWS::EC2::VPNConnectionRoute
+    Properties: 
+      DestinationCidrBlock: 10.10.0.0/16
+      VpnConnectionId: !Ref myVPNConnection
+
+  VPC2:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.10.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: "Corporate Data Center"
+
+  VPC2Subnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC2
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: 10.10.0.0/24
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPC2} Private Subnet
+
+  VPC2Subnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC2
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: 10.10.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPC2} Public Subnet
+
+  VPC2Subnet1RTAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref VPC2Subnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  VPC2Subnet2RTAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref VPC2Subnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachInternetGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Join [ '', [ 'OnPremPrivateRouteTable-', !Ref 'AWS::StackName' ] ]
+        - Key: Network
+          Value: Private
+      VpcId: !Ref VPC2
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Join [ '', [ 'OnPremPublicRouteTable-', !Ref 'AWS::StackName' ] ]
+        - Key: Network
+          Value: Public
+      VpcId: !Ref VPC2
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Join [ '', [ 'OnPremInternetGateway-', !Ref 'AWS::StackName' ] ]
+
+  AttachInternetGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC2
+
+  AppServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for app server
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: "0.0.0.0/0"
+      Tags:
+        - Key: Name
+          Value: !Sub "OnPremAppServerSecurityGroup-${AWS::StackName}"
+      VpcId:
+        !Ref VPC2
+
+  AppServer:
+    Type: AWS::EC2::Instance
+    DependsOn: NatRoute0
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: t3.micro
+      SecurityGroupIds:
+        - !Ref AppServerSecurityGroup
+      SubnetId: !Ref VPC2Subnet1
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # install updates
+          yum update -y
+          
+          # configure AWS CLI for ec2-user
+          mkdir /home/ec2-user/.aws
+          cat > /home/ec2-user/.aws/config<< EOF
+          [default]
+          region = ${AWS::Region}
+          EOF
+          
+          chown -r ec2-user:ec2-user /home/ec2-user/.aws
+          
+          # set up web server
+          yum install -y httpd
+          echo "Hello, world!" > /var/www/html/index.html
+          systemctl enable httpd.service
+          systemctl start httpd.service
+      Tags:
+        - Key: Name
+          Value: !Join [ '', [ 'AppServer-', !Ref 'AWS::StackName' ] ]
+
+  MyEIP:
+    Type: AWS::EC2::EIP
+
+  NatEIP0:
+    Type: AWS::EC2::EIP
+
+  NatGateway0:
+    Type: AWS::EC2::NatGateway
+    DependsOn: AttachInternetGateway
+    Properties:
+      AllocationId: !GetAtt NatEIP0.AllocationId
+      SubnetId: !Ref VPC2Subnet2
+      Tags:
+        - Key: Name
+          Value: !Join [ '', [ 'OnPremNatGateway-', !Ref 'AWS::StackName' ] ]
+
+  NatRoute0:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway0
+
+Outputs:
+  AppServerPrivateIp:
+    Value: !GetAtt AppServer.PrivateIp
+  ElasticIPaddress:
+    Value: !Ref MyEIP
+    Export: 
+      Name: ElasticIPaddress
+  VPNSubnet:
+    Value: !Ref VPC2Subnet2
+    Export:
+      Name: VPNSubnet
+  VPCId:
+    Value: !Ref VPC2
+    Export:
+      Name: VPCId
+  RouteTableId:
+    Value: !Ref PrivateRouteTable
+    Export:
+      Name: RouteTableId

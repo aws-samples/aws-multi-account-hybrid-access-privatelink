@@ -1,0 +1,116 @@
+Description:  This template (2/2) deploys the base network for this demo.
+
+Parameters:
+  TheLatestAmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+  CustomerGatewayAddress:
+    Type: String
+    Description: The Internet-routable IP address for your gateway's external interface.
+  OutsideIPAddress:
+    Type: String
+    Description: The outside IP address for your site-to-site VPN connection's tunnel #1.
+
+Resources:
+  VPNServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for VPN server
+      SecurityGroupIngress:
+        - IpProtocol: udp
+          FromPort: 500
+          ToPort: 500
+          CidrIp: !Join [ '', [ !Ref OutsideIPAddress, '/32' ] ]
+        - IpProtocol: udp
+          FromPort: 4500
+          ToPort: 4500
+          CidrIp: !Join [ '', [ !Ref OutsideIPAddress, '/32' ] ]
+      Tags:
+        - Key: Name
+          Value: !Sub "VPNServerSecurityGroup-${AWS::StackName}"
+      VpcId:
+        Fn::ImportValue: !Sub VPCId
+
+  VPNServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref TheLatestAmiId
+      InstanceType: t3.micro
+      SecurityGroupIds:
+        - !Ref VPNServerSecurityGroup
+      SubnetId:           
+        Fn::ImportValue: !Sub VPNSubnet
+      SourceDestCheck: false
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # install updates
+          yum update -y
+          
+          # install OpenSWAN
+          yum install -y openswan 
+          
+          # configure AWS CLI for ec2-user
+          mkdir /home/ec2-user/.aws
+          cat > /home/ec2-user/.aws/config<< EOF
+          [default]
+          region = ${AWS::Region}
+          EOF
+          
+          chown -r ec2-user:ec2-user /home/ec2-user/.aws
+
+          sh -c "cat << 'EOF' > /etc/sysctl.conf
+          net.ipv4.ip_forward = 1
+          net.ipv4.conf.default.rp_filter = 0
+          net.ipv4.conf.default.accept_source_route = 0
+          EOF"
+
+          sysctl -p
+          
+          sh -c "cat << 'EOF' > /etc/ipsec.d/aws.conf
+          conn Tunnel1
+                  authby=secret
+                  auto=start
+                  left=%defaultroute
+                  leftid=${ CustomerGatewayAddress }
+                  right=${ OutsideIPAddress }
+                  type=tunnel
+                  ikelifetime=8h
+                  keylife=1h
+                  phase2alg=aes128-sha1;modp1024
+                  ike=aes128-sha1;modp1024
+                  keyingtries=%forever
+                  keyexchange=ike
+                  leftsubnet=10.10.0.0/16
+                  rightsubnet=10.20.0.0/16
+                  dpddelay=10
+                  dpdtimeout=30
+                  dpdaction=restart_by_peer
+          EOF"
+
+          sh -c "cat << 'EOF' > /etc/ipsec.d/aws.secrets
+          ${ CustomerGatewayAddress } ${ OutsideIPAddress }: PSK \"9ndNNmrD98coJdb28x__jwd7Dk._\"
+          EOF"
+
+          systemctl enable ipsec.service
+          ipsec start
+      Tags:
+        - Key: Name
+          Value: !Join [ '', [ 'VPNServer-', !Ref 'AWS::StackName' ] ]
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPNServer
+    Properties:
+      RouteTableId: 
+        Fn::ImportValue: !Sub RouteTableId
+      DestinationCidrBlock: 10.20.0.0/16
+      InstanceId: !Ref VPNServer
+
+  EIPattachment:    
+    Type: AWS::EC2::EIPAssociation
+    DependsOn: VPNServer
+    Properties:     
+      InstanceId: !Ref VPNServer 
+      EIP: 
+        Fn::ImportValue: !Sub ElasticIPaddress
