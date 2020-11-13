@@ -137,7 +137,7 @@ Resources:
       EnableDnsHostnames: true
       Tags:
         - Key: Name
-          Value: "Shared Services VPC"
+          Value: "Service Provider VPC"
 
   VPC1Subnet1:
     Type: AWS::EC2::Subnet
